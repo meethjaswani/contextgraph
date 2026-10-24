@@ -194,7 +194,7 @@ class LLM:
         for attempt in range(6):
             r = self.http.post(f"{self.base}/chat/completions", json=body,
                                headers={"Authorization": f"Bearer {self.key}"})
-            if r.status_code == 429 and "per-day" in r.text:
+            if r.status_code == 429 and re.search(r"per-day|per day|\(TPD\)|\(RPD\)", r.text):
                 raise RuntimeError(f"daily quota reached: {r.text[:200]}")
             if r.status_code in (429, 500, 502, 503, 529):
                 time.sleep(2 ** attempt * 2)
