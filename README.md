@@ -111,13 +111,64 @@ error: '_send' is ambiguous, pass one of these qualified names:
 ## Evaluation
 
 <!-- EVAL:START -->
-Results pending.
+15 questions (5 per repo), each run once without and once with ContextGraph, on free-tier models from Groq.
+
+| Repo | Mode | Fully correct | Answer recall | Avg tokens | Avg files read | Avg tool calls | Avg time (s) |
+|---|---|---|---|---|---|---|---|
+| **all** | baseline | 8/15 (53%) | 65% | 8,710 | 1.2 | 4.9 | 51.3 |
+| **all** | contextgraph | 11/15 (73%) | 79% | 8,338 | 0.6 | 4.0 | 64.6 |
+
+With ContextGraph the agent answered **11 of 15** questions fully (baseline: 8), named **79%** of the expected items (baseline: 65%), and opened **half as many files** (0.6 vs 1.2 per question) with fewer tool calls (4.0 vs 4.9). Average tokens were about the same (8.3K vs 8.7K).
+
+<details>
+<summary>By repo and by question</summary>
+
+| Repo | Mode | Fully correct | Answer recall | Avg tokens | Avg files read | Avg tool calls | Avg time (s) |
+|---|---|---|---|---|---|---|---|
+| click | baseline | 2/5 (40%) | 66% | 10,840 | 1.2 | 5.4 | 60.8 |
+| click | contextgraph | 2/5 (40%) | 56% | 11,478 | 0.8 | 5.6 | 68.1 |
+| requests | baseline | 1/5 (20%) | 30% | 11,596 | 1.6 | 7.0 | 70.1 |
+| requests | contextgraph | 4/5 (80%) | 80% | 9,179 | 0.8 | 4.6 | 55.9 |
+| rich | baseline | 5/5 (100%) | 100% | 3,694 | 0.8 | 2.4 | 23.0 |
+| rich | contextgraph | 5/5 (100%) | 100% | 4,357 | 0.2 | 1.8 | 70.0 |
+
+| Question | Model | Baseline | ContextGraph | Baseline tokens | ContextGraph tokens |
+|---|---|---|---|---|---|
+| req-01 | openai/gpt-oss-20b | missed merge_environment_settings | missed merge_environment_settings, resolve_proxies | 3,607 | 27,204 |
+| req-02 | openai/gpt-oss-20b | correct | correct | 11,600 | 12,064 |
+| req-04 | openai/gpt-oss-20b | missed resolve_redirects | correct | 19,408 | 2,013 |
+| req-05 | openai/gpt-oss-20b | missed Session.send | correct | 4,556 | 2,167 |
+| req-07 | openai/gpt-oss-20b | missed prepare_body, prepare_content_length | correct | 18,807 | 2,449 |
+| click-01 | openai/gpt-oss-20b | correct | correct | 1,814 | 11,030 |
+| click-02 | openai/gpt-oss-20b | missed resolve_command, _parse_decls, get_help_record, join_options, normalize_opt, __init__ | missed resolve_command, _parse_decls, get_help_record, join_options, normalize_opt, __init__ | 27,507 | 24,126 |
+| click-05 | openai/gpt-oss-20b | missed Context | missed auto_envvar_prefix, Context | 4,828 | 16,931 |
+| click-07 | qwen/qwen3.8-27b | correct | correct | 2,423 | 2,456 |
+| click-08 | qwen/qwen3.8-27b | missed _process_result | missed forward | 17,628 | 2,846 |
+| rich-01 | qwen/qwen3.8-27b | correct | correct | 2,280 | 3,262 |
+| rich-03 | qwen/qwen3.8-27b | correct | correct | 3,007 | 2,548 |
+| rich-04 | qwen/qwen3.8-27b | correct | correct | 3,451 | 9,839 |
+| rich-06 | qwen/qwen3.8-27b | correct | correct | 8,041 | 3,517 |
+| rich-10 | qwen/qwen3.8-27b | correct | correct | 1,690 | 2,617 |
+
+</details>
+
+**What to read into this, and what not to:**
+
+- **Where the graph helps most is "who calls X".** In requests, the baseline agent grepped for the call, opened the file at the matching line and named the wrong enclosing function or stopped short (`req-04`: `send` instead of `resolve_redirects`; `req-05` and `req-07` likewise). `find_callers` returns the enclosing function directly, so those three ContextGraph runs were correct with 2.0–2.4K tokens each, against 4.6–19K for the baseline.
+- **The graph does not help with config lookups.** "Where is X configured" questions (`req-02`, `click-05`, `rich-04`) are a grep job, and `rich-04` cost more tokens with ContextGraph because the agent explored with graph tools first.
+- **Small free models do not always use the tools they are given.** In `req-01` the ContextGraph agent never called a graph tool and ran out of turns re-reading the same file; `find_callers get_environ_proxies` returns both expected callers.
+- **Rich was too easy to separate the two modes:** both got 5/5.
+- **Time is not comparable.** Most of the wall-clock time is the harness waiting out the free tier's per-minute limit, so the time column mostly measures queueing.
+- **Small sample, two models.** Free-tier daily token limits (200K per model) did not allow all 30 questions on one model. Questions `req-*`, `click-01`, `click-02` and `click-05` ran on `openai/gpt-oss-20b`; the rest on `qwen/qwen3.8-27b`. Both modes of a question always ran on the same model. The full 30 questions run with `python eval/run_eval.py --all`.
+- **One harness bug during this run:** `read_file` ignored the `line_start`/`line_end` argument names some models use, so those calls read from line 1. It affected both modes and is fixed now; the numbers above are from before the fix.
+
+Raw runs, including every tool call and answer: [`eval/results/results.json`](eval/results/results.json).
 <!-- EVAL:END -->
 
 ### Method
 
 - **Repos:** [requests](https://github.com/psf/requests) v2.32.3 (36 Python files), [click](https://github.com/pallets/click) 8.1.7 (71) and [rich](https://github.com/Textualize/rich) v13.7.1 (190).
-- **Questions:** 30 in [`eval/questions.json`](eval/questions.json), ten per repo: who calls X, what does X inherit from, where is Y configured, what breaks if I change Z, which files import W. Every expected answer was checked by hand against the source with grep, not taken from the tool.
+- **Questions:** 30 in [`eval/questions.json`](eval/questions.json), ten per repo, of which 15 (the `core` list) were run for the table above: who calls X, what does X inherit from, where is Y configured, what breaks if I change Z, which files import W. Every expected answer was checked by hand against the source with grep, not taken from the tool.
 - **Agent:** the same tool-calling loop, model, prompt and budgets in both modes, up to 12 turns. Baseline tools are `list_files`, `read_file` (80 lines per call) and `grep` (25 matches). The ContextGraph mode gets the same three tools plus the eight graph tools, called in-process so they return exactly what the MCP server returns (`get_context` capped at 900 tokens). The budgets keep every request under 8K tokens so the eval runs on free API tiers: tool results are capped at 4,000 characters, and once a conversation passes about 4,500 tokens the oldest tool results are replaced by a short stub.
 - **Grading:** an answer must name every expected item (case-insensitive, whole-word match). "Fully correct" counts answers that name all of them; "answer recall" is the share of expected items named. Tokens are prompt plus completion tokens summed over every model call in a run, as reported by the API. "Files read" counts distinct files opened with `read_file`.
 - **Run it yourself:** put `CG_LLM_API_KEY`, `CG_LLM_BASE_URL` and `CG_LLM_MODEL` in `eval/.env` (any OpenAI-compatible endpoint, e.g. Groq or OpenRouter), then `pip install -e ".[eval]"` and `python eval/run_eval.py`. It paces itself to the provider's rate limits; `--resume` keeps finished runs and retries the rest. Per-run results, including every tool call, land in `eval/results/`.

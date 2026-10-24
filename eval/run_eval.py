@@ -36,7 +36,7 @@ RESULTS = HERE / "results"
 # Budgets apply to both modes equally. They are sized so every request fits a small
 # per-minute token limit (8K on free tiers): tool output is capped, and once the
 # conversation grows past HISTORY_TOKENS the oldest tool outputs are replaced by a stub.
-MAX_TURNS = 12
+MAX_TURNS = 10
 READ_LIMIT = 80  # lines per read_file call
 GREP_LIMIT = 25  # matches per grep call
 TOOL_CHARS = 4000  # max characters of one tool result
@@ -100,6 +100,7 @@ class Run:
     files_read: list = field(default_factory=list)
     tool_calls: int = 0
     trace: list = field(default_factory=list)  # tool name + args, in order
+    model: str = ""
     turns: int = 0
     seconds: float = 0.0
     error: str = ""
@@ -137,8 +138,10 @@ class Workspace:
         if name == "read_file":
             path = a["path"]
             lines = self._safe(path).read_text(errors="replace").splitlines()
-            start = max(int(a.get("start_line") or 1), 1)
-            end = min(int(a.get("end_line") or start + READ_LIMIT - 1), start + READ_LIMIT - 1, len(lines))
+            # Models also send line_start/line_end or start/end; accept them all.
+            start = max(int(a.get("start_line") or a.get("line_start") or a.get("start") or 1), 1)
+            end_arg = a.get("end_line") or a.get("line_end") or a.get("end")
+            end = min(int(end_arg or start + READ_LIMIT - 1), start + READ_LIMIT - 1, len(lines))
             self.files_read.add(self._safe(path).relative_to(self.root).as_posix())
             body = "\n".join(f"{i}: {lines[i - 1]}" for i in range(start, end + 1))
             more = f"\n[file has {len(lines)} lines; showing {start}-{end}]" if end < len(lines) or start > 1 else ""
@@ -212,7 +215,7 @@ class LLM:
             if r.status_code in (500, 502, 503, 529):
                 time.sleep(2 ** min(attempt, 5) * 2)
                 continue
-            if r.status_code == 400 and re.search(r"output_parse_failed|tool_use_failed", r.text) and bad_output < 3:
+            if r.status_code == 400 and re.search(r"output_parse_failed|tool_use_failed", r.text) and bad_output < 6:
                 # The model emitted a malformed tool call; sample again.
                 bad_output += 1
                 body["temperature"] = 0.3
@@ -252,7 +255,7 @@ def run_one(llm: LLM, q: dict, mode: str, graphs: dict) -> Run:
     tools = BASE_TOOLS + (GRAPH_TOOLS if mode == "contextgraph" else [])
     system = SYSTEM + (GRAPH_INSTRUCTIONS if mode == "contextgraph" else "")
     messages = [{"role": "system", "content": system}, {"role": "user", "content": q["question"]}]
-    run = Run(id=q["id"], repo=q["repo"], mode=mode)
+    run = Run(id=q["id"], repo=q["repo"], mode=mode, model=llm.model)
     started = time.perf_counter()
     try:
         for turn in range(MAX_TURNS):
@@ -323,21 +326,42 @@ def summarize(runs: list[Run]) -> str:
     return "\n".join(rows)
 
 
+def per_question(runs: list[Run]) -> str:
+    rows = ["| Question | Model | Baseline | ContextGraph | Baseline tokens | ContextGraph tokens |", "|---|---|---|---|---|---|"]
+    by = {(r.id, r.mode): r for r in runs}
+    for qid in dict.fromkeys(r.id for r in runs):
+        b, c = by.get((qid, "baseline")), by.get((qid, "contextgraph"))
+        if not b or not c:
+            continue
+        mark = lambda r: "correct" if r.correct else f"missed {', '.join(r.missing)}"
+        rows.append(f"| {qid} | {b.model} | {mark(b)} | {mark(c)} | {b.tokens:,} | {c.tokens:,} |")
+    return "\n".join(rows)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", nargs="*", help="question ids")
+    ap.add_argument("--all", action="store_true", help="run all questions, not just the core set")
+    ap.add_argument("--model", help="override CG_LLM_MODEL for this invocation")
     ap.add_argument("--modes", nargs="*", default=["baseline", "contextgraph"])
     ap.add_argument("--workers", type=int, default=1)
     ap.add_argument("--resume", action="store_true", help="keep finished runs from results.json, redo the rest")
     args = ap.parse_args()
     spec = json.loads((HERE / "questions.json").read_text())
     ensure_repos(spec["repos"])
-    questions = [q for q in spec["questions"] if not args.only or q["id"] in args.only]
+    if args.only:
+        questions = [q for q in spec["questions"] if q["id"] in args.only]
+    elif args.all:
+        questions = spec["questions"]
+    else:
+        questions = [q for q in spec["questions"] if q["id"] in spec["core"]]
     graphs = {}
     for name in {q["repo"] for q in questions}:
         graphs[name], stats = index_repo(REPOS / name)
         print(f"indexed {name}: {stats.files} files in {stats.seconds}s")
     llm = LLM()
+    if args.model:
+        llm.model = args.model
     out = RESULTS / "results.json"
     done: dict[tuple[str, str], Run] = {}
     if args.resume and out.exists():
@@ -358,7 +382,7 @@ def main() -> None:
     runs = sorted([*done.values(), *fresh], key=lambda r: order.get((r.id, r.mode), 0))
     RESULTS.mkdir(exist_ok=True)
     out.write_text(json.dumps(
-        {"model": llm.model, "max_turns": MAX_TURNS, "runs": [asdict(r) | {"tokens": r.tokens} for r in runs]},
+        {"models": sorted({r.model for r in runs if r.model}), "max_turns": MAX_TURNS, "runs": [asdict(r) | {"tokens": r.tokens} for r in runs]},
         indent=1))
     errored = [r for r in runs if r.error]
     if errored:
@@ -368,8 +392,9 @@ def main() -> None:
     for r in runs:
         if not r.error:
             finished.setdefault(r.id, set()).add(r.mode)
-    runs = [r for r in runs if not r.error and finished[r.id] >= set(args.modes)]
-    table = summarize(runs)
+    runs = [r for r in runs if not r.error and finished[r.id] >= set(args.modes)
+            and r.id in {q["id"] for q in questions}]
+    table = summarize(runs) + "\n\n" + per_question(runs)
     (RESULTS / "summary.md").write_text(table + "\n")
     print("\n" + table)
 

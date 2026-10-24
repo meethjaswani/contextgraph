@@ -4,6 +4,9 @@
     "click": {"url": "https://github.com/pallets/click", "ref": "8.1.7"},
     "rich": {"url": "https://github.com/Textualize/rich", "ref": "v13.7.1"}
   },
+  "core": ["req-01", "req-02", "req-04", "req-05", "req-07",
+           "click-01", "click-02", "click-05", "click-07", "click-08",
+           "rich-01", "rich-03", "rich-04", "rich-06", "rich-10"],
   "questions": [
     {"id": "req-01", "repo": "requests", "type": "callers",
      "question": "In the library source (not tests), which functions or methods call `get_environ_proxies`?",
