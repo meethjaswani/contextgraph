@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 520" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10z" fill="#5b6672"/>
+    </marker>
+    <style>
+      .box{fill:#ffffff;stroke:#c9d2dc;stroke-width:1.5}
+      .key{fill:#eef6ff;stroke:#3b82f6;stroke-width:1.5}
+      .t{font-size:15px;font-weight:600;fill:#16202b}
+      .s{font-size:12.5px;fill:#4b5865}
+      .m{font-family:Menlo, Consolas, monospace;font-size:12px;fill:#1f4f99}
+      .l{stroke:#5b6672;stroke-width:1.5;fill:none;marker-end:url(#a)}
+      .d{stroke:#5b6672;stroke-width:1.5;fill:none;stroke-dasharray:5 4;marker-end:url(#a)}
+      .cap{font-size:11.5px;fill:#6b7785;letter-spacing:.06em}
+    </style>
+  </defs>
+  <rect width="960" height="520" rx="14" fill="#f7f9fb"/>
+
+  <!-- pipeline -->
+  <text x="30" y="36" class="cap">INDEX  (contextgraph index &lt;repo&gt;)</text>
+  <rect x="30" y="52" width="150" height="96" rx="10" class="box"/>
+  <text x="46" y="80" class="t">Source files</text>
+  <text x="46" y="102" class="s">git ls-files</text>
+  <text x="46" y="120" class="s">sha256 per file</text>
+  <text x="46" y="138" class="s">unchanged → cached</text>
+
+  <rect x="215" y="52" width="180" height="96" rx="10" class="box"/>
+  <text x="231" y="80" class="t">Parser (tree-sitter)</text>
+  <text x="231" y="102" class="s">LanguageParser registry</text>
+  <text x="231" y="120" class="s">Python today; JS / TS</text>
+  <text x="231" y="138" class="s">plug in by extension</text>
+
+  <rect x="430" y="52" width="200" height="96" rx="10" class="box"/>
+  <text x="446" y="80" class="t">Extract</text>
+  <text x="446" y="102" class="s">files, classes, functions,</text>
+  <text x="446" y="120" class="s">methods: lines, signature,</text>
+  <text x="446" y="138" class="s">docstring, imports, calls</text>
+
+  <rect x="665" y="52" width="265" height="96" rx="10" class="key"/>
+  <text x="681" y="80" class="t">Resolve + build graph</text>
+  <text x="681" y="102" class="s">scopes, imports, re-exports, self,</text>
+  <text x="681" y="120" class="s">typed params, return types, bases</text>
+  <text x="681" y="138" class="s">unresolved externals → leaf nodes</text>
+
+  <path d="M180 100 H213" class="l"/>
+  <path d="M395 100 H428" class="l"/>
+  <path d="M630 100 H663" class="l"/>
+
+  <!-- graph -->
+  <rect x="300" y="200" width="360" height="130" rx="12" class="key"/>
+  <text x="318" y="228" class="t">NetworkX MultiDiGraph</text>
+  <text x="318" y="252" class="m">nodes  file · class · function · method · ext</text>
+  <text x="318" y="274" class="m">edges  defines · imports · calls · inherits</text>
+  <text x="318" y="300" class="s">saved to .contextgraph/graph.json + index.json</text>
+  <text x="318" y="318" class="s">(parse cache keyed by file hash)</text>
+  <path d="M797 148 V265 H662" class="l"/>
+
+  <!-- tools -->
+  <text x="30" y="372" class="cap">SERVE  (contextgraph serve)</text>
+  <rect x="30" y="388" width="600" height="104" rx="10" class="box"/>
+  <text x="46" y="414" class="t">MCP server: tools</text>
+  <text x="46" y="438" class="m">search_symbol · get_definition · find_callers · find_callees</text>
+  <text x="46" y="458" class="m">get_dependencies · get_dependents · repo_overview</text>
+  <text x="46" y="478" class="m">get_context(symbol, depth, max_tokens) → source + N hops, trimmed</text>
+  <path d="M480 330 V386" class="l"/>
+
+  <rect x="680" y="388" width="250" height="104" rx="10" class="box"/>
+  <text x="696" y="414" class="t">Coding agent</text>
+  <text x="696" y="438" class="s">any MCP client over stdio</text>
+  <text x="696" y="458" class="s">or streamable HTTP; asks for</text>
+  <text x="696" y="478" class="s">just the code it needs</text>
+  <path d="M632 440 H678" class="l"/>
+  <path d="M805 386 C805 350 700 345 662 300" class="d"/>
+  <text x="822" y="350" class="s">files changed →</text><text x="822" y="366" class="s">auto re-index</text>
+</svg>
