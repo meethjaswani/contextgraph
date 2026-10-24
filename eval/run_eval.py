@@ -4,7 +4,7 @@ The agent talks to any OpenAI-compatible chat completions endpoint:
 
     export CG_LLM_API_KEY=...                       # or put KEY=value lines in eval/.env
     export CG_LLM_BASE_URL=https://openrouter.ai/api/v1   # default
-    export CG_LLM_MODEL=nvidia/nemotron-3-super-120b-a12b:free  # default
+    export CG_LLM_MODEL=nvidia/nemotron-3-ultra-550b-a55b:free  # default
     python eval/run_eval.py                 # all questions, both modes
     python eval/run_eval.py --only req-01   # one question
 
@@ -93,6 +93,7 @@ class Run:
     completion_tokens: int = 0
     files_read: list = field(default_factory=list)
     tool_calls: int = 0
+    trace: list = field(default_factory=list)  # tool name + args, in order
     turns: int = 0
     seconds: float = 0.0
     error: str = ""
@@ -178,7 +179,7 @@ class LLM:
     def __init__(self) -> None:
         load_env()
         os.environ.setdefault("CG_LLM_BASE_URL", "https://openrouter.ai/api/v1")
-        os.environ.setdefault("CG_LLM_MODEL", "nvidia/nemotron-3-super-120b-a12b:free")
+        os.environ.setdefault("CG_LLM_MODEL", "nvidia/nemotron-3-ultra-550b-a55b:free")
         try:
             self.base = os.environ["CG_LLM_BASE_URL"].rstrip("/")
             self.key = os.environ["CG_LLM_API_KEY"]
@@ -193,6 +194,8 @@ class LLM:
         for attempt in range(6):
             r = self.http.post(f"{self.base}/chat/completions", json=body,
                                headers={"Authorization": f"Bearer {self.key}"})
+            if r.status_code == 429 and "per-day" in r.text:
+                raise RuntimeError(f"daily quota reached: {r.text[:200]}")
             if r.status_code in (429, 500, 502, 503, 529):
                 time.sleep(2 ** attempt * 2)
                 continue
@@ -239,6 +242,7 @@ def run_one(llm: LLM, q: dict, mode: str, graphs: dict) -> Run:
                     args = json.loads(c["function"].get("arguments") or "{}")
                 except ValueError:
                     args = {}
+                run.trace.append({"tool": c["function"]["name"], "args": args})
                 out = ws.call(c["function"]["name"], args)
                 messages.append({"role": "tool", "tool_call_id": c["id"], "content": out[:20000]})
         else:
@@ -291,6 +295,7 @@ def main() -> None:
     ap.add_argument("--only", nargs="*", help="question ids")
     ap.add_argument("--modes", nargs="*", default=["baseline", "contextgraph"])
     ap.add_argument("--workers", type=int, default=6)
+    ap.add_argument("--resume", action="store_true", help="keep finished runs from results.json, redo the rest")
     args = ap.parse_args()
     spec = json.loads((HERE / "questions.json").read_text())
     ensure_repos(spec["repos"])
@@ -300,17 +305,37 @@ def main() -> None:
         graphs[name], stats = index_repo(REPOS / name)
         print(f"indexed {name}: {stats.files} files in {stats.seconds}s")
     llm = LLM()
-    jobs = [(q, m) for q in questions for m in args.modes]
+    out = RESULTS / "results.json"
+    done: dict[tuple[str, str], Run] = {}
+    if args.resume and out.exists():
+        for d in json.loads(out.read_text())["runs"]:
+            d.pop("tokens", None)
+            run = Run(**d)
+            if not run.error:  # keep finished runs, redo errored ones
+                done[(run.id, run.mode)] = run
+    jobs = [(q, m) for q in questions for m in args.modes if (q["id"], m) not in done]
+    print(f"{len(done)} runs kept, {len(jobs)} to run with {llm.model}")
     with ThreadPoolExecutor(args.workers) as pool:
-        runs = list(pool.map(lambda qm: run_one(llm, *qm, graphs), jobs))
-    for r in runs:
+        fresh = list(pool.map(lambda qm: run_one(llm, *qm, graphs), jobs))
+    for r in fresh:
         flag = "ok " if r.correct else "MISS"
         print(f"{flag} {r.id:9} {r.mode:12} tokens={r.tokens:>7,} files={len(r.files_read):>2} "
-              f"t={r.seconds:>5}s {('missing ' + ', '.join(r.missing)) if r.missing else ''} {r.error}")
+              f"t={r.seconds:>5}s {('missing ' + ', '.join(r.missing)) if r.missing else ''} {r.error[:120]}")
+    order = {(q["id"], m): i for i, (q, m) in enumerate((q, m) for q in spec["questions"] for m in ("baseline", "contextgraph"))}
+    runs = sorted([*done.values(), *fresh], key=lambda r: order.get((r.id, r.mode), 0))
     RESULTS.mkdir(exist_ok=True)
-    (RESULTS / "results.json").write_text(json.dumps(
-        {"model_env": "CG_LLM_MODEL", "max_turns": MAX_TURNS, "runs": [asdict(r) | {"tokens": r.tokens} for r in runs]},
+    out.write_text(json.dumps(
+        {"model": llm.model, "max_turns": MAX_TURNS, "runs": [asdict(r) | {"tokens": r.tokens} for r in runs]},
         indent=1))
+    errored = [r for r in runs if r.error]
+    if errored:
+        print(f"\n{len(errored)} runs errored; rerun with --resume to retry only those")
+    # Compare like with like: only questions finished in every mode.
+    finished = {}
+    for r in runs:
+        if not r.error:
+            finished.setdefault(r.id, set()).add(r.mode)
+    runs = [r for r in runs if not r.error and finished[r.id] >= set(args.modes)]
     table = summarize(runs)
     (RESULTS / "summary.md").write_text(table + "\n")
     print("\n" + table)
