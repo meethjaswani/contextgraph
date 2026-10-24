@@ -2,7 +2,7 @@
 
 An MCP server that turns a codebase into a queryable graph, so AI coding agents fetch only the code they need instead of reading the whole repo.
 
-![contextgraph indexing requests and answering graph queries](docs/images/index.png)
+![contextgraph answering graph queries on the sample repo](docs/images/demo.gif)
 
 ## Why
 
@@ -37,6 +37,10 @@ Symbols can be passed as qualified names (`requests.sessions.Session.send`), dot
 `get_context` puts the target's full source first, then neighbours by hop distance. A neighbour gets its full source if it fits the budget, otherwise its outline (signature, docstring, member signatures), otherwise it is listed under "omitted". Tokens are estimated at four characters per token.
 
 ![get_context on the sample repo](docs/images/context.png)
+
+On a real repo (requests): a cold index takes 0.08 s, a re-index with no changes 0.03 s.
+
+![contextgraph indexing requests and answering graph queries](docs/images/index.png)
 
 ## Quickstart
 
@@ -114,9 +118,9 @@ Results pending.
 
 - **Repos:** [requests](https://github.com/psf/requests) v2.32.3 (36 Python files), [click](https://github.com/pallets/click) 8.1.7 (71) and [rich](https://github.com/Textualize/rich) v13.7.1 (190).
 - **Questions:** 30 in [`eval/questions.json`](eval/questions.json), ten per repo: who calls X, what does X inherit from, where is Y configured, what breaks if I change Z, which files import W. Every expected answer was checked by hand against the source with grep, not taken from the tool.
-- **Agent:** the same tool-calling loop, model, prompt and temperature 0 in both modes, up to 20 turns. Baseline tools are `list_files`, `read_file` (300 lines per call) and `grep`. The ContextGraph mode gets the same three tools plus the eight graph tools, called in-process so they return exactly what the MCP server returns.
+- **Agent:** the same tool-calling loop, model, prompt and budgets in both modes, up to 12 turns. Baseline tools are `list_files`, `read_file` (80 lines per call) and `grep` (25 matches). The ContextGraph mode gets the same three tools plus the eight graph tools, called in-process so they return exactly what the MCP server returns (`get_context` capped at 900 tokens). The budgets keep every request under 8K tokens so the eval runs on free API tiers: tool results are capped at 4,000 characters, and once a conversation passes about 4,500 tokens the oldest tool results are replaced by a short stub.
 - **Grading:** an answer must name every expected item (case-insensitive, whole-word match). "Fully correct" counts answers that name all of them; "answer recall" is the share of expected items named. Tokens are prompt plus completion tokens summed over every model call in a run, as reported by the API. "Files read" counts distinct files opened with `read_file`.
-- **Run it yourself:** put `CG_LLM_API_KEY=...` in `eval/.env` (any OpenAI-compatible endpoint; set `CG_LLM_BASE_URL` and `CG_LLM_MODEL` to change provider or model), then `pip install -e ".[eval]"` and `python eval/run_eval.py`. Per-run results land in `eval/results/`.
+- **Run it yourself:** put `CG_LLM_API_KEY`, `CG_LLM_BASE_URL` and `CG_LLM_MODEL` in `eval/.env` (any OpenAI-compatible endpoint, e.g. Groq or OpenRouter), then `pip install -e ".[eval]"` and `python eval/run_eval.py`. It paces itself to the provider's rate limits; `--resume` keeps finished runs and retries the rest. Per-run results, including every tool call, land in `eval/results/`.
 
 ## Tests
 

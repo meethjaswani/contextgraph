@@ -33,9 +33,15 @@ from contextgraph.indexer import index_repo
 HERE = Path(__file__).resolve().parent
 REPOS = HERE / "repos"
 RESULTS = HERE / "results"
-MAX_TURNS = 20
-READ_LIMIT = 300  # lines per read_file call
-GREP_LIMIT = 60  # matches per grep call
+# Budgets apply to both modes equally. They are sized so every request fits a small
+# per-minute token limit (8K on free tiers): tool output is capped, and once the
+# conversation grows past HISTORY_TOKENS the oldest tool outputs are replaced by a stub.
+MAX_TURNS = 12
+READ_LIMIT = 80  # lines per read_file call
+GREP_LIMIT = 25  # matches per grep call
+TOOL_CHARS = 4000  # max characters of one tool result
+HISTORY_TOKENS = 4500  # estimated tokens of conversation sent per request
+CONTEXT_TOKENS = 900  # get_context budget
 
 SYSTEM = (
     "You answer questions about the Python repository in the current directory. "
@@ -71,7 +77,7 @@ GRAPH_TOOLS = [
     {"name": "get_dependents", "description": "Files that import a file.", "parameters": _file},
     {"name": "get_context", "description": "A symbol plus its callers and callees, trimmed to a token budget.",
      "parameters": {"type": "object", "properties": {"symbol": {"type": "string"}, "depth": {"type": "integer", "default": 1},
-                    "max_tokens": {"type": "integer", "default": 3000}}, "required": ["symbol"]}},
+                    "max_tokens": {"type": "integer", "default": 900}}, "required": ["symbol"]}},
     {"name": "repo_overview", "description": "Module tree, one line per file.", "parameters": {"type": "object", "properties": {}}},
 ]
 GRAPH_INSTRUCTIONS = (
@@ -127,7 +133,7 @@ class Workspace:
         if name == "list_files":
             base = self._safe(a.get("path") or ".")
             files = sorted(p.relative_to(self.root).as_posix() for p in base.rglob("*.py") if ".git" not in p.parts)
-            return "\n".join(files[:400]) + (f"\n... {len(files) - 400} more" if len(files) > 400 else "")
+            return "\n".join(files[:150]) + (f"\n... {len(files) - 150} more" if len(files) > 150 else "")
         if name == "read_file":
             path = a["path"]
             lines = self._safe(path).read_text(errors="replace").splitlines()
@@ -160,7 +166,7 @@ class Workspace:
         if name == "get_dependents":
             return cg_tools.get_dependents(cg, a["file"], depth)
         if name == "get_context":
-            return cg_tools.get_context(cg, a["symbol"], depth, int(a.get("max_tokens") or 3000))
+            return cg_tools.get_context(cg, a["symbol"], depth, min(int(a.get("max_tokens") or CONTEXT_TOKENS), CONTEXT_TOKENS))
         if name == "repo_overview":
             return cg_tools.repo_overview(cg)
         return f"error: unknown tool {name}"
@@ -189,20 +195,46 @@ class LLM:
         self.http = httpx.Client(timeout=120)
 
     def chat(self, messages: list, tools: list) -> dict:
-        body = {"model": self.model, "messages": messages, "max_tokens": 2000, "temperature": 0,
+        body = {"model": self.model, "messages": messages, "max_tokens": 1500, "temperature": 0,
                 "tools": [{"type": "function", "function": t} for t in tools]}
-        for attempt in range(6):
+        if os.environ.get("CG_LLM_REASONING_EFFORT"):
+            body["reasoning_effort"] = os.environ["CG_LLM_REASONING_EFFORT"]
+        bad_output = 0
+        for attempt in range(12):
             r = self.http.post(f"{self.base}/chat/completions", json=body,
                                headers={"Authorization": f"Bearer {self.key}"})
             if r.status_code == 429 and re.search(r"per-day|per day|\(TPD\)|\(RPD\)", r.text):
                 raise RuntimeError(f"daily quota reached: {r.text[:200]}")
-            if r.status_code in (429, 500, 502, 503, 529):
-                time.sleep(2 ** attempt * 2)
+            if r.status_code == 429:
+                wait = re.search(r"try again in (?:(\d+)m)?([\d.]+)s", r.text)
+                time.sleep((int(wait.group(1) or 0) * 60 + float(wait.group(2)) + 1) if wait else 2 ** min(attempt, 5) * 2)
+                continue
+            if r.status_code in (500, 502, 503, 529):
+                time.sleep(2 ** min(attempt, 5) * 2)
+                continue
+            if r.status_code == 400 and re.search(r"output_parse_failed|tool_use_failed", r.text) and bad_output < 3:
+                # The model emitted a malformed tool call; sample again.
+                bad_output += 1
+                body["temperature"] = 0.3
                 continue
             if r.status_code >= 400:
                 raise RuntimeError(f"HTTP {r.status_code}: {r.text[:300]}")
             return r.json()
         raise RuntimeError(f"HTTP {r.status_code} after retries: {r.text[:300]}")
+
+
+def _tokens(messages: list) -> int:
+    return sum(len(json.dumps(m)) for m in messages) // 4
+
+
+def trim_history(messages: list) -> None:
+    """Stub out the oldest tool results until the conversation fits HISTORY_TOKENS (latest result kept)."""
+    tool_idx = [i for i, m in enumerate(messages) if m["role"] == "tool"]
+    for i in tool_idx[:-1]:
+        if _tokens(messages) <= HISTORY_TOKENS:
+            return
+        if not messages[i]["content"].startswith("[earlier output removed"):
+            messages[i]["content"] = f"[earlier output removed to save space: {len(messages[i]['content'])} chars]"
 
 
 def grade(answer: str, expect: list) -> tuple[float, list]:
@@ -225,6 +257,7 @@ def run_one(llm: LLM, q: dict, mode: str, graphs: dict) -> Run:
     try:
         for turn in range(MAX_TURNS):
             run.turns = turn + 1
+            trim_history(messages)
             resp = llm.chat(messages, tools)
             usage = resp.get("usage") or {}
             run.prompt_tokens += usage.get("prompt_tokens", 0)
@@ -244,9 +277,9 @@ def run_one(llm: LLM, q: dict, mode: str, graphs: dict) -> Run:
                     args = {}
                 run.trace.append({"tool": c["function"]["name"], "args": args})
                 out = ws.call(c["function"]["name"], args)
-                messages.append({"role": "tool", "tool_call_id": c["id"], "content": out[:20000]})
+                messages.append({"role": "tool", "tool_call_id": c["id"], "content": out[:TOOL_CHARS] + ("\n[truncated]" if len(out) > TOOL_CHARS else "")})
         else:
-            run.error = "turn limit"
+            run.answer = "(no final answer within the turn limit)"
     except Exception as e:
         run.error = f"{type(e).__name__}: {e}"
     run.seconds = round(time.perf_counter() - started, 1)
@@ -294,7 +327,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", nargs="*", help="question ids")
     ap.add_argument("--modes", nargs="*", default=["baseline", "contextgraph"])
-    ap.add_argument("--workers", type=int, default=6)
+    ap.add_argument("--workers", type=int, default=1)
     ap.add_argument("--resume", action="store_true", help="keep finished runs from results.json, redo the rest")
     args = ap.parse_args()
     spec = json.loads((HERE / "questions.json").read_text())
